@@ -19,6 +19,9 @@ class ComfyUIRemoteVideoUpload:
     """
     Upload VIDEO input to remote server
     """
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -104,6 +107,10 @@ class RemoteImageUpload:
     ComfyUI自定义节点：远程图片上传节点
     接收图片输入和秘钥，将图片上传到远程服务器
     """
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
     
     @classmethod
     def INPUT_TYPES(cls):
