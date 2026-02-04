@@ -3,7 +3,6 @@ ComfyUI自定义节点：远程图片上传
 将图片上传到远程服务器
 """
 
-import torch
 import requests
 import io
 import random
@@ -11,6 +10,94 @@ import string
 from PIL import Image
 import numpy as np
 
+import os
+import requests
+import time
+import hashlib
+
+class ComfyUIRemoteVideoUpload:
+    """
+    Upload VIDEO input to remote server
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video": ("VIDEO",),
+                "upload_url": ("STRING", {
+                    "default": "http://127.0.0.1:65360/upload_video"
+                }),
+                "api_key": ("STRING", {
+                    "default": ""
+                }),
+                "timeout_seconds": ("INT", {
+                    "default": 300,
+                    "min": 30,
+                    "max": 3600
+                }),
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "upload"
+    OUTPUT_NODE = True
+    CATEGORY = "utils/network"
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # 禁用缓存，确保每次都会执行上传
+        return float("nan")
+
+    def _extract_video_path(self, video):
+        if isinstance(video, dict):
+            for key in ("path", "video_path", "filename", "file"):
+                value = video.get(key)
+                if isinstance(value, str) and os.path.exists(value):
+                    return value
+
+        raise RuntimeError("Cannot find valid video file path in VIDEO input")
+
+    def upload(self, video, upload_url, api_key, timeout_seconds):
+        video_path = self._extract_video_path(video)
+
+        headers = {
+            "X-API-KEY": api_key
+        }
+
+        with open(video_path, "rb") as f:
+            files = {
+                "file": (os.path.basename(video_path), f, "video/mp4")
+            }
+
+            try:
+                start = time.time()
+                resp = requests.post(
+                    upload_url,
+                    headers=headers,
+                    files=files,
+                    timeout=timeout_seconds
+                )
+                cost = time.time() - start
+
+            except requests.exceptions.Timeout:
+                raise RuntimeError(
+                    f"Video upload timeout after {timeout_seconds}s"
+                )
+
+            except Exception as e:
+                raise RuntimeError(f"Video upload failed: {e}")
+
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Upload failed [{resp.status_code}]: {resp.text}"
+            )
+
+        print(
+            f"[VideoUpload] OK: {video_path}, cost={cost:.2f}s"
+        )
+
+        return ()
 
 class RemoteImageUpload:
     """
@@ -134,10 +221,12 @@ class RemoteImageUpload:
 
 # 节点映射（ComfyUI需要这个来注册节点）
 NODE_CLASS_MAPPINGS = {
-    "RemoteImageUpload": RemoteImageUpload
+    "RemoteImageUpload": RemoteImageUpload,
+    "RemoteVideoUpload": ComfyUIRemoteVideoUpload
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RemoteImageUpload": "Remote Image Upload"
+    "RemoteImageUpload": "Remote Image Upload",
+    "RemoteVideoUpload": "Remote Video Upload"
 }
 
