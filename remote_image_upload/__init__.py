@@ -5,15 +5,23 @@ ComfyUI自定义节点：远程图片上传
 
 import requests
 import io
-import random
-import string
 from PIL import Image
 import numpy as np
-
+import tempfile
 import os
 import requests
 import time
-import hashlib
+from pathlib import Path
+
+from comfy_api.latest._input_impl.video_types import (
+    VideoFromComponents,
+    VideoFromFile,
+)
+
+try:
+    from comfy.utils import save_video
+except ImportError:
+    save_video = None
 
 class ComfyUIRemoteVideoUpload:
     """
@@ -82,99 +90,75 @@ class ComfyUIRemoteVideoUpload:
 
     def _get_video_bytes(self, video):
         """
-        从 VIDEO 输入中获取视频字节内容，支持多种输入格式
-        
-        Args:
-            video: VIDEO 输入，可能是：
-                - 字符串路径
-                - 字典（包含 path, video_path, filename, file 等键）
-                - 文件对象（有 read 方法）
-                - BytesIO 对象
-                - 字节数据
-        
         Returns:
-            tuple: (video_bytes: bytes, filename: str, mime_type: str)
+            (video_bytes: bytes, filename: str, mime_type: str)
         """
-        filename = "video.mp4"  # 默认文件名
-        video_bytes = None
-        
-        # 1. 如果是字符串，尝试作为文件路径读取
-        if isinstance(video, str):
-            if os.path.exists(video):
-                filename = os.path.basename(video)
-                with open(video, "rb") as f:
-                    video_bytes = f.read()
-                return video_bytes, filename, self._detect_mime_type(filename)
-            else:
-                raise RuntimeError(
-                    f"VIDEO input is a string but file does not exist: {video}"
-                )
-        
-        # 2. 如果是字典，尝试提取路径或文件对象
-        if isinstance(video, dict):
-            # 尝试提取文件路径
-            for key in ("path", "video_path", "filename", "file"):
-                value = video.get(key)
-                if value is None:
-                    continue
-                
-                # 如果是字符串路径
-                if isinstance(value, str):
-                    if os.path.exists(value):
-                        filename = os.path.basename(value)
-                        with open(value, "rb") as f:
-                            video_bytes = f.read()
-                        return video_bytes, filename, self._detect_mime_type(filename)
-                
-                # 如果是文件对象（有 read 方法）
-                if hasattr(value, 'read'):
-                    try:
-                        if hasattr(value, 'name'):
-                            filename = os.path.basename(value.name)
-                        video_bytes = value.read()
-                        if hasattr(value, 'seek'):
-                            value.seek(0)  # 重置文件指针
-                        return video_bytes, filename, self._detect_mime_type(filename)
-                    except Exception as e:
-                        raise RuntimeError(
-                            f"Failed to read from file object in VIDEO input: {e}"
-                        )
-            
-            # 如果字典中有 'bytes' 键
-            if 'bytes' in video:
-                video_bytes = video['bytes']
-                if isinstance(video_bytes, bytes):
-                    if 'filename' in video:
-                        filename = video['filename']
-                    return video_bytes, filename, self._detect_mime_type(filename)
-        
-        # 3. 如果是文件对象（有 read 方法）
-        if hasattr(video, 'read'):
-            try:
-                if hasattr(video, 'name'):
-                    filename = os.path.basename(video.name)
-                video_bytes = video.read()
-                if hasattr(video, 'seek'):
-                    video.seek(0)  # 重置文件指针
-                return video_bytes, filename, self._detect_mime_type(filename)
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to read from VIDEO input file object: {e}"
-                )
-        
-        # 4. 如果是 BytesIO 对象
-        if isinstance(video, io.BytesIO):
-            video_bytes = video.getvalue()
+
+        # -----------------------------
+        # 1. VideoFromComponents
+        # -----------------------------
+        if isinstance(video, VideoFromComponents):
+            ext = "mp4"
+
+            with tempfile.NamedTemporaryFile(suffix=f".{ext}") as tmp: 
+                video.save_to(tmp.name)
+                tmp.seek(0)
+                data = tmp.read()
+
+            filename = f"video.{ext}"
+            return data, filename, self._detect_mime_type(filename)
+
+        # -----------------------------
+        # 2. VideoFromFile
+        # -----------------------------
+        if isinstance(video, VideoFromFile):
+
+            # 2.1 优先直接用已有文件路径（零拷贝）
+            path = getattr(video, "path", None)
+            if isinstance(path, str) and os.path.exists(path):
+                filename = os.path.basename(path)
+                with open(path, "rb") as f:
+                    return f.read(), filename, self._detect_mime_type(filename)
+
+            # 2.2 fallback：用 save_to（内存或临时文件）
+            buffer = io.BytesIO()
+            video.save_to(buffer)
+
+            buffer.seek(0)
+            video_bytes = buffer.read()
+
+            ext = video.get_container_format() or "mp4"
+            filename = f"video.{ext}"
+
             return video_bytes, filename, self._detect_mime_type(filename)
-        
-        # 5. 如果是字节数据
-        if isinstance(video, bytes):
-            return video, filename, self._detect_mime_type(filename)
-        
-        # 6. 如果都不匹配，抛出详细错误信息
+
+        # -----------------------------
+        # 3. 其他兼容输入（可选）
+        # -----------------------------
+        if isinstance(video, (str, Path)):
+            path = str(video)
+            if not os.path.exists(path):
+                raise RuntimeError(f"Video path does not exist: {path}")
+
+            filename = os.path.basename(path)
+            with open(path, "rb") as f:
+                return f.read(), filename, self._detect_mime_type(filename)
+
+        if hasattr(video, "read"):
+            data = video.read()
+            if hasattr(video, "seek"):
+                video.seek(0)
+
+            filename = getattr(video, "name", "video.mp4")
+            filename = os.path.basename(filename)
+
+            return data, filename, self._detect_mime_type(filename)
+
+        # -----------------------------
+        # 4. 不支持的类型
+        # -----------------------------
         raise RuntimeError(
-            f"Cannot extract video bytes from VIDEO input. "
-            f"Type: {type(video)}, Value: {str(video)[:100]}"
+            f"Unsupported VIDEO input type: {type(video)}"
         )
 
     def upload(self, video, upload_url, api_key, timeout_seconds):
@@ -372,7 +356,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "zcong Remote Image Upload": "Upload Image to remote server",
-    "zcong Remote Video Upload": "Upload Video to remote server"
+    "zcong Remote Image Upload": "zcong Remote Image Upload",
+    "zcong Remote Video Upload": "zcong Remote Video Upload"
 }
 
