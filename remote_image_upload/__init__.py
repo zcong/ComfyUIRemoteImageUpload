@@ -3,34 +3,73 @@ ComfyUI自定义节点：远程图片上传
 将图片上传到远程服务器
 """
 
-import requests
 import io
-from PIL import Image
-import numpy as np
-import tempfile
 import os
 import requests
+import tempfile
 import time
 from pathlib import Path
 
+import numpy as np
+from PIL import Image
 from comfy_api.latest._input_impl.video_types import (
     VideoFromComponents,
     VideoFromFile,
 )
 
-try:
-    from comfy.utils import save_video
-except ImportError:
-    save_video = None
+BASE36_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+VIDEO_MIME_TYPES = {
+    "mp4": "video/mp4",
+    "mov": "video/quicktime",
+    "mkv": "video/x-matroska",
+    "webm": "video/webm",
+    "avi": "video/x-msvideo",
+}
+
+
+def encode_base36(number, min_width=1):
+    """将非负整数编码为固定宽度的 base36 字符串，便于短文件名按字典序排序。"""
+    if number < 0:
+        raise ValueError("number must be non-negative")
+    if number == 0:
+        encoded = "0"
+    else:
+        chars = []
+        while number:
+            number, remainder = divmod(number, 36)
+            chars.append(BASE36_ALPHABET[remainder])
+        encoded = "".join(reversed(chars))
+    return encoded.rjust(min_width, "0")
+
+
+def build_upload_filename(prefix, ext):
+    """生成短且可按时间排序的上传文件名。"""
+    timestamp = encode_base36(int(time.time() * 1000), min_width=8)
+    return f"{prefix}_{timestamp}.{ext.lower()}"
+
+
+def detect_video_mime_type(filename_or_path):
+    """根据文件扩展名检测视频 MIME 类型。"""
+    if not filename_or_path or "." not in str(filename_or_path):
+        return "video/mp4"
+
+    ext = str(filename_or_path).rsplit(".", 1)[1].lower()
+    return VIDEO_MIME_TYPES.get(ext, "video/mp4")
+
+
+def build_video_upload_name(path_or_name=None, default_ext="mp4"):
+    """为视频生成统一的上传文件名。"""
+    if path_or_name:
+        ext = Path(str(path_or_name)).suffix.lower().lstrip(".") or default_ext
+    else:
+        ext = default_ext
+    return build_upload_filename("v", ext)
+
 
 class ComfyUIRemoteVideoUpload:
     """
     Upload VIDEO input to remote server
     """
-    @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        return float("nan")
-
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -60,34 +99,6 @@ class ComfyUIRemoteVideoUpload:
         # 禁用缓存，确保每次都会执行上传
         return float("nan")
 
-    def _detect_mime_type(self, filename_or_path):
-        """
-        根据文件扩展名检测 MIME 类型
-        
-        Args:
-            filename_or_path: 文件名或文件路径
-            
-        Returns:
-            MIME 类型字符串
-        """
-        if not filename_or_path:
-            return "video/mp4"  # 默认类型
-        
-        ext = None
-        if isinstance(filename_or_path, str):
-            if '.' in filename_or_path:
-                ext = filename_or_path.rsplit('.', 1)[1].lower()
-        
-        mime_types = {
-            'mp4': 'video/mp4',
-            'mov': 'video/quicktime',
-            'mkv': 'video/x-matroska',
-            'webm': 'video/webm',
-            'avi': 'video/x-msvideo',
-        }
-        
-        return mime_types.get(ext, 'video/mp4')
-
     def _get_video_bytes(self, video):
         """
         Returns:
@@ -105,8 +116,8 @@ class ComfyUIRemoteVideoUpload:
                 tmp.seek(0)
                 data = tmp.read()
 
-            filename = f"video.{ext}"
-            return data, filename, self._detect_mime_type(filename)
+            filename = build_video_upload_name(default_ext=ext)
+            return data, filename, detect_video_mime_type(filename)
 
         # -----------------------------
         # 2. VideoFromFile
@@ -116,9 +127,9 @@ class ComfyUIRemoteVideoUpload:
             # 2.1 优先直接用已有文件路径（零拷贝）
             path = getattr(video, "path", None)
             if isinstance(path, str) and os.path.exists(path):
-                filename = os.path.basename(path)
+                filename = build_video_upload_name(path)
                 with open(path, "rb") as f:
-                    return f.read(), filename, self._detect_mime_type(filename)
+                    return f.read(), filename, detect_video_mime_type(filename)
 
             # 2.2 fallback：用 save_to（内存或临时文件）
             buffer = io.BytesIO()
@@ -127,10 +138,9 @@ class ComfyUIRemoteVideoUpload:
             buffer.seek(0)
             video_bytes = buffer.read()
 
-            ext = video.get_container_format() or "mp4"
-            filename = f"video.{ext}"
+            filename = build_video_upload_name(default_ext=video.get_container_format() or "mp4")
 
-            return video_bytes, filename, self._detect_mime_type(filename)
+            return video_bytes, filename, detect_video_mime_type(filename)
 
         # -----------------------------
         # 3. 其他兼容输入（可选）
@@ -140,19 +150,19 @@ class ComfyUIRemoteVideoUpload:
             if not os.path.exists(path):
                 raise RuntimeError(f"Video path does not exist: {path}")
 
-            filename = os.path.basename(path)
+            filename = build_video_upload_name(path)
             with open(path, "rb") as f:
-                return f.read(), filename, self._detect_mime_type(filename)
+                return f.read(), filename, detect_video_mime_type(filename)
 
         if hasattr(video, "read"):
             data = video.read()
             if hasattr(video, "seek"):
                 video.seek(0)
 
-            filename = getattr(video, "name", "video.mp4")
-            filename = os.path.basename(filename)
+            original_name = os.path.basename(getattr(video, "name", "video.mp4"))
+            filename = build_video_upload_name(original_name)
 
-            return data, filename, self._detect_mime_type(filename)
+            return data, filename, detect_video_mime_type(filename)
 
         # -----------------------------
         # 4. 不支持的类型
@@ -255,6 +265,10 @@ class RemoteImageUpload:
     FUNCTION = "upload_image"
     CATEGORY = "image/remote"
     OUTPUT_NODE = True  # 这是一个输出节点，不返回数据
+
+    def _build_image_filename(self):
+        """生成按时间可排序的文件名，便于按名称倒序查看最新图片。"""
+        return build_upload_filename("i", "png")
     
     def upload_image(self, image, api_key, server_url):
         """
@@ -301,9 +315,11 @@ class RemoteImageUpload:
             headers = {
                 "X-API-KEY": api_key.strip()
             }
+
+            filename = self._build_image_filename()
             
             files = {
-                "file": ("image.png", buf, "image/png")
+                "file": (filename, buf, "image/png")
             }
             
             # 发送POST请求
@@ -359,4 +375,3 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "zcong Remote Image Upload": "zcong Remote Image Upload",
     "zcong Remote Video Upload": "zcong Remote Video Upload"
 }
-
