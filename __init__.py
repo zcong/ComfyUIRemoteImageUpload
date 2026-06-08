@@ -17,7 +17,6 @@ from comfy_api.latest._input_impl.video_types import (
     VideoFromFile,
 )
 
-BASE36_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 VIDEO_MIME_TYPES = {
     "mp4": "video/mp4",
     "mov": "video/quicktime",
@@ -27,25 +26,9 @@ VIDEO_MIME_TYPES = {
 }
 
 
-def encode_base36(number, min_width=1):
-    """将非负整数编码为固定宽度的 base36 字符串，便于短文件名按字典序排序。"""
-    if number < 0:
-        raise ValueError("number must be non-negative")
-    if number == 0:
-        encoded = "0"
-    else:
-        chars = []
-        while number:
-            number, remainder = divmod(number, 36)
-            chars.append(BASE36_ALPHABET[remainder])
-        encoded = "".join(reversed(chars))
-    return encoded.rjust(min_width, "0")
-
-
-def build_upload_filename(prefix, ext):
-    """生成短且可按时间排序的上传文件名。"""
-    timestamp = encode_base36(int(time.time() * 1000), min_width=8)
-    return f"{prefix}_{timestamp}.{ext.lower()}"
+def build_upload_filename(ext):
+    """生成上传占位文件名，正式文件名由服务端统一分配。"""
+    return f"upload.{ext.lower()}"
 
 
 def detect_video_mime_type(filename_or_path):
@@ -58,12 +41,12 @@ def detect_video_mime_type(filename_or_path):
 
 
 def build_video_upload_name(path_or_name=None, default_ext="mp4"):
-    """为视频生成统一的上传文件名。"""
+    """为视频生成上传占位文件名，保留扩展名供服务端识别。"""
     if path_or_name:
         ext = Path(str(path_or_name)).suffix.lower().lstrip(".") or default_ext
     else:
         ext = default_ext
-    return build_upload_filename("v", ext)
+    return build_upload_filename(ext)
 
 
 class ComfyUIRemoteVideoUpload:
@@ -224,8 +207,10 @@ class ComfyUIRemoteVideoUpload:
                     f"Upload failed [{resp.status_code}]: {resp.text}"
                 )
             
+            result = resp.json()
+            saved_filename = result.get("filename", filename)
             print(
-                f"[VideoUpload] OK: {filename} ({len(video_bytes)} bytes), cost={cost:.2f}s"
+                f"[VideoUpload] OK: {saved_filename} ({len(video_bytes)} bytes), cost={cost:.2f}s"
             )
             
         except RuntimeError:
@@ -267,8 +252,8 @@ class RemoteImageUpload:
     OUTPUT_NODE = True  # 这是一个输出节点，不返回数据
 
     def _build_image_filename(self):
-        """生成按时间可排序的文件名，便于按名称倒序查看最新图片。"""
-        return build_upload_filename("i", "png")
+        """生成上传占位文件名，正式文件名由服务端统一分配。"""
+        return build_upload_filename("png")
     
     def upload_image(self, image, api_key, server_url):
         """
